@@ -1,4 +1,5 @@
 #include "Driver.hpp"
+#include "tinyxml.h"
 
 using namespace qualisys;
 
@@ -14,106 +15,18 @@ using namespace qualisys;
 
 const size_t qualisys::Driver::MAX_MARKERS = 64;
 
-struct QTMHeader
-{
-    enum EPacketType
-    {
-        PacketError       = 0,
-        PacketCommand     = 1,
-        PacketXML         = 2,
-        PacketData        = 3,
-        PacketNoMoreData  = 4,
-        PacketC3DFile     = 5,
-        PacketEvent       = 6,
-        PacketDiscover    = 7,
-        PacketNone        = 8
-    };
-
-    uint32_t size;
-    uint32_t type;
-
-    /** 
-     * check the QTM packet header
-     * will throw if the packet header is not valid
-     */
-    void checkValid() const
-    {
-	if( size < 8 )
-	    throw std::runtime_error("QTM Protocol: invalid packet size.");
-
-	if( type > 8 )
-	    throw std::runtime_error("QTM Protocol: Invalid packet type.");
-    }
-
-    size_t getSize() const
-    {
-	return size;
-    }
-
-    size_t getPayloadSize() const
-    {
-	return getSize() - sizeof( QTMHeader );
-    }
-
-    EPacketType getType() const
-    {
-	return static_cast<EPacketType>( type );
-    }
-
-    QTMHeader() {}
-
-    QTMHeader( EPacketType type, size_t size )
-	: size( size ), type( type )
-    {
-    }
-} __attribute__ ((__packed__));
-
-struct ComponentHeader
-{
-    enum EComponentType 
-    {
-        Component3d            = 1,
-        Component3dNoLabels    = 2,
-        ComponentAnalog        = 3,
-        ComponentForce         = 4,
-        Component6d            = 5,
-        Component6dEuler       = 6,
-        Component2d            = 7,
-        Component2dLin         = 8,
-        Component3dRes         = 9,
-        Component3dNoLabelsRes = 10,
-        Component6dRes         = 11,
-        Component6dEulerRes    = 12,
-        ComponentAnalogSingle  = 13,
-        ComponentImage         = 14,
-        ComponentForceSingle   = 15,
-        ComponentNone          = 16
-    };
-
-    EComponentType getType() const
-    {
-	if( type > 16 )
-	    throw std::runtime_error("QTMComponent: Invalid component type");
-
-	return static_cast<EComponentType>(type);
-    }
-
-    uint32_t size;
-    uint32_t type;
-    uint32_t marker_count;
-    uint16_t drop_rate;
-    uint16_t out_of_sync_rate;
-} __attribute__ ((__packed__));
-
-struct Marker6d
-{
-    float x,y,z;
-    float rot[9];
-} __attribute__ ((__packed__));
-
 Driver::Driver()
-    : iodrivers_base::Driver( sizeof( QTMHeader ) + sizeof( ComponentHeader ) + MAX_MARKERS * sizeof( Marker6d ) )
-{}
+    : iodrivers_base::Driver( sizeof( QTMHeader ) + sizeof( ComponentHeader ) + MAX_MARKERS * sizeof( Marker6d ) ),
+    body_idx(-1)
+{
+    buffer_size = sizeof( QTMHeader ) + sizeof( ComponentHeader ) + MAX_MARKERS * sizeof( Marker6d ); 
+    buffer = new uint8_t[buffer_size];
+}
+
+Driver::~Driver()
+{
+    delete[] buffer;
+}
 
 bool isLittleEndian()
 {
@@ -139,8 +52,21 @@ void Driver::connect( const std::string& host, const unsigned int base_port )
     setQTMVersion( 1, 9 );
 }
 
-void Driver::startStreamData()
+void Driver::startStreamData( const std::string& label )
 {
+    body_idx = -1;
+
+    std::vector<std::string> labels;
+    loadParameters(labels);
+    for( size_t i=0; i<labels.size(); i++ )
+    {
+	if( labels[i] == label )
+	    body_idx = i;
+    }
+
+    if( body_idx < 0 )
+	throw std::runtime_error("Could not find specified body label.");
+
     // start streaming of data frames 
     std::stringstream ss;
     ss << "StreamFrames";
@@ -157,34 +83,53 @@ void Driver::stopStreamData()
     writeQTMCommand( ss.str() );
 }
 
-bool Driver::getTransform( base::Time& time, base::Affine3d& transform, int marker_idx )
+void Driver::loadParameters( std::vector<std::string>& labels )
 {
-    const size_t buf_size = sizeof( QTMHeader ) + sizeof( ComponentHeader ) + MAX_MARKERS * sizeof( Marker6d );
-    uint8_t buf[buf_size];
+    // send a version command
+    std::stringstream ss;
+    ss << "GetParameters 6D";
+    writeQTMCommand( ss.str() );
 
-    int res = readPacket( buf, buf_size );
-    if( res <= 0 )
-	return false;
+    // load the resulting xml parameters
+    if( !readQTMPacket( QTMHeader::PacketXML ) )
+	throw std::runtime_error("could not read parameter response.");
 
-    // check packet header
-    QTMHeader *header = reinterpret_cast<QTMHeader*>( buf );
-    if( header->getType() != QTMHeader::PacketData )
+    // parse the xml
+    TiXmlDocument xmldoc;
+    xmldoc.Parse( reinterpret_cast<char*>(buffer + sizeof(QTMHeader)) );
+
+    // iterate over the bodies in the xml struct
+    TiXmlNode *the6d = xmldoc.FirstChild()->FirstChild("The_6D");
+    TiXmlNode *body = 0;
+    while( (body = the6d->IterateChildren( "Body", body )) )
+    {
+	std::string name = body->FirstChild( "Name" )->Value();
+	labels.push_back( name );
+    }
+}
+
+bool Driver::getTransform( base::Time& time, base::Affine3d& transform )
+{
+    if( body_idx < 0 )
+	throw std::runtime_error("No valid marker/body index has been selected using the startSream call.");
+
+    if( !readQTMPacket( QTMHeader::PacketData ) )
 	return false;
 
     // check component header
-    ComponentHeader *cheader = reinterpret_cast<ComponentHeader*>( buf + sizeof( QTMHeader) );
+    ComponentHeader *cheader = reinterpret_cast<ComponentHeader*>( buffer + sizeof( QTMHeader) );
     if( cheader->getType() != ComponentHeader::Component6d )
 	return false;
 
     // for now, we only return the marker with the given index
-    if( marker_idx >= static_cast<int>(cheader->marker_count) )
+    if( body_idx >= static_cast<int>(cheader->marker_count) )
 	throw std::runtime_error( "getTransform: invalid marker index." );
     
     // get requested body id from the struct
     Marker6d *c6d = reinterpret_cast<Marker6d*>( 
-	    buf + sizeof( QTMHeader) 
+	    buffer + sizeof( QTMHeader) 
 	    + sizeof( ComponentHeader) 
-	    + marker_idx * sizeof( Marker6d) );
+	    + body_idx * sizeof( Marker6d) );
     
     // set the result values
     time = base::Time::now();
@@ -195,29 +140,50 @@ bool Driver::getTransform( base::Time& time, base::Affine3d& transform, int mark
     return true;
 }
 
+bool Driver::readQTMPacket( QTMHeader::EPacketType type )
+{
+    // there might be event packages in the meantime, that 
+    // we ignore for now, so skip those
+    QTMHeader *header = reinterpret_cast<QTMHeader*>(buffer);
+    do
+    {
+	int res = readPacket( buffer, buffer_size );
+	if( res <= 0 )
+	    return false;
+
+	if( res >= static_cast<int>(buffer_size) )
+	    throw std::runtime_error( "readQTMPacket: Buffer not large enough." );
+
+    } while( header->getType() == QTMHeader::PacketEvent );
+
+    // if the response is an error, throw
+    if( header->getType() == QTMHeader::PacketError )
+	throw std::runtime_error( getBufferString() );
+
+    // check for the right packet type
+    if( header->getType() != type )
+	return false;
+
+    return true;
+}
+
 /** 
  * reads a packet from the stream and interprets it as a string 
  */
-bool Driver::readQTMString( std::string& qtmstring )
+bool Driver::readQTMString( std::string& result )
 {
-    const size_t buf_size = 10000;
-    uint8_t buf[buf_size];
+    if( readQTMPacket( QTMHeader::PacketCommand ) )
+    {
+	result = getBufferString();
+	return true;
+    }
+    return false;
+}
 
-    int res = readPacket( buf, buf_size );
-    if( res <= 0 )
-	return false;
-
-    if( res >= static_cast<int>(buf_size) )
-	throw std::runtime_error( "readQTMString: Buffer not large enough." );
-
-    QTMHeader *header = reinterpret_cast<QTMHeader*>(buf);
-
-    if( header->getType() != QTMHeader::PacketCommand )
-	throw std::runtime_error( "readQTMString: Wrong packet type. " + header->getType() );
-
-    qtmstring = std::string( reinterpret_cast<char*>(buf + sizeof(QTMHeader)), header->getPayloadSize() - 1 );
-
-    return true;
+std::string Driver::getBufferString()
+{
+    QTMHeader *header = reinterpret_cast<QTMHeader*>(buffer);
+    return std::string( reinterpret_cast<char*>(buffer + sizeof(QTMHeader)), header->getPayloadSize() - 1 );
 }
 
 /**

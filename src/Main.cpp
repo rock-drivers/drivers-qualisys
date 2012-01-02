@@ -17,14 +17,29 @@ int main(int argc, char** argv)
     driver.connect( host );
     std::cout << "done." << std::endl;
 
-    std::cout << "Start Streaming Data..." << std::endl;
-    driver.startStreamData();
-    for( int i=0; i<10; i++ )
+    std::cout << "Load parameters..." << std::endl;
+    std::vector<std::string> labels;
+    driver.loadParameters( labels );
+    for( size_t i=0; i<labels.size(); i++ )
     {
-	base::Time ts;
-	base::Affine3d transform;
-	driver.getTransform( ts, transform, 0 );
+	std::cout << i << " " << labels[i] << std::endl;
     }
-    std::cout << "Stop Streaming Data..." << std::endl;
-    driver.stopStreamData();
+
+    if( labels.size() > 0 )
+    {
+	std::cout << "Start Streaming Data..." << std::endl;
+	driver.startStreamData( labels[0] );
+	for( int i=0; i<10; i++ )
+	{
+	    base::Time ts;
+	    base::Affine3d transform;
+	    driver.getTransform( ts, transform );
+	}
+	std::cout << "Stop Streaming Data..." << std::endl;
+	driver.stopStreamData();
+    }
+    else
+    {
+	std::cout << "Server has not provided any bodies" << std::endl;
+    }
 }
