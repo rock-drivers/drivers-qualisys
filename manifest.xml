@@ -3,6 +3,6 @@
   Simple driver with reduced functionality for the qualisys tracking system.
   </description>
   <author>Jakob Schwendner/jakob.schwendner@dfki.de</author>
-  <depend package="iodrivers_base" />
+  <depend package="drivers/iodrivers_base" />
   <depend package="base/types" />
 </package>
