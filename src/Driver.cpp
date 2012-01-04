@@ -1,5 +1,5 @@
 #include "Driver.hpp"
-#include "tinyxml.h"
+#include <tinyxml/tinyxml.h>
 
 using namespace qualisys;
 
