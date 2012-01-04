@@ -5,4 +5,5 @@
   <author>Jakob Schwendner/jakob.schwendner@dfki.de</author>
   <depend package="drivers/iodrivers_base" />
   <depend package="base/types" />
+  <depend package="external/tinyxml" />
 </package>
