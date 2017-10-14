@@ -4,7 +4,7 @@
 #include <iostream>
 #include <iodrivers_base/Driver.hpp>
 
-#include <base/eigen.h>
+#include <base/Eigen.hpp>
 
 namespace qualisys
 {
